@@ -1,8 +1,8 @@
 # gnome-calendar-mcp
 
 A small [MCP](https://modelcontextprotocol.io) server that exposes your **GNOME
-calendar** to Claude Code as read-only tools — so Claude can see what's on your
-schedule and help you plan.
+calendar** to Claude Code — so Claude can see what's on your schedule, help you
+plan, and add events for you.
 
 It reads the same aggregated agenda the GNOME top-bar clock shows, via the
 `org.gnome.Shell.CalendarServer` D-Bus service. That means **every calendar you've
@@ -16,8 +16,26 @@ GNOME Calendar, it shows up here.
   of today through `days` days ahead. The natural starting point for planning.
 - **`list_events(start, end)`** — events between two ISO dates (`YYYY-MM-DD`),
   inclusive. Pass the same date twice for a single day.
+- **`list_calendars()`** — all calendars and which are writable (a create target).
+- **`create_event(summary, start, end?, location?, description?, calendar?)`** —
+  add an event. `start`/`end` are `YYYY-MM-DDTHH:MM` (local) for timed events or
+  `YYYY-MM-DD` for all-day. Defaults to the local **Personal** calendar; pass a
+  calendar name to target another.
 
-Each event: `summary`, `start`/`end` (ISO local), `all_day`, `day`.
+Each event read back has: `summary`, `start`/`end` (ISO local), `all_day`, `day`.
+
+### Creating events
+
+Reads come from the GNOME Shell aggregator (read-only), so creates go through
+**Evolution Data Server** — the backend GNOME Calendar itself uses. Typically the
+local **Personal** calendar and any **Google** calendars you own are writable;
+subscriptions (webcal) and birthdays are read-only. An event created on a Google
+calendar is pushed up to Google by EDS server-side.
+
+`create_event` does **not** add attendees and does **not** send invitations — it
+creates the event on your calendar only. (Invitations would need a deliberate
+follow-up: either attendees on a groupware calendar, or emailing an iCalendar
+invite.)
 
 ## How it works
 

@@ -16,13 +16,18 @@ Pure-Python (jeepney) — no PyGObject / system bindings required.
 
 from __future__ import annotations
 
+import configparser
 import os
 import time
+import uuid
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
+from icalendar import Event as ICalEvent
 from jeepney import DBusAddress, MatchRule, message_bus, new_method_call
 from jeepney.io.blocking import open_dbus_connection
+from jeepney.low_level import HeaderFields, MessageType
 
 _ADDR = DBusAddress(
     "/org/gnome/Shell/CalendarServer",
@@ -165,10 +170,179 @@ def events_between(start: date, end: date) -> list[Event]:
     return fetch_events(int(since_dt.timestamp()), int(end_dt.timestamp()))
 
 
+# --------------------------------------------------------------------------- #
+# Writing events (create only) via Evolution Data Server.
+#
+# The Shell CalendarServer we read from is read-only, so creates go through EDS,
+# the backend GNOME Calendar itself uses. GOA/Google calendars are registered in
+# the *live registry* (Sources5), not as files on disk — so we enumerate the
+# registry, read each source's real UID + keyfile Data, and open writable ones
+# through the calendar factory. New events land in EDS and sync to their backend
+# (a created event on a Google calendar propagates to Google).
+# --------------------------------------------------------------------------- #
+
+_SOURCES_DEST = "org.gnome.evolution.dataserver.Sources5"
+_SOURCE_MANAGER = "/org/gnome/evolution/dataserver/SourceManager"
+_SOURCE_IFACE = "org.gnome.evolution.dataserver.Source"
+_PROPS_IFACE = "org.freedesktop.DBus.Properties"
+_CAL_IFACE = "org.gnome.evolution.dataserver.Calendar"
+_LOCAL_BACKEND = "local"
+
+_FACTORY = DBusAddress(
+    "/org/gnome/evolution/dataserver/CalendarFactory",
+    bus_name="org.gnome.evolution.dataserver.Calendar8",
+    interface="org.gnome.evolution.dataserver.CalendarFactory",
+)
+
+
+@dataclass
+class Calendar:
+    uid: str
+    name: str
+    backend: str
+    writable: bool | None  # None = couldn't determine
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "backend": self.backend, "writable": self.writable}
+
+
+def _call(conn, addr, method, signature=None, body=()):
+    """Send a method call and return its body, raising on a D-Bus error reply."""
+    msg = new_method_call(addr, method) if signature is None else new_method_call(
+        addr, method, signature, body
+    )
+    reply = conn.send_and_get_reply(msg)
+    if reply.header.message_type == MessageType.error:
+        name = reply.header.fields.get(HeaderFields.error_name, "D-Bus error")
+        detail = reply.body[0] if reply.body else ""
+        raise RuntimeError(f"{name}: {detail}")
+    return reply.body
+
+
+def _get_prop(conn, object_path, iface, prop):
+    addr = DBusAddress(object_path, bus_name=_SOURCES_DEST, interface=_PROPS_IFACE)
+    body = _call(conn, addr, "Get", "ss", (iface, prop))
+    return body[0][1] if body else None  # jeepney decodes a variant to (sig, value)
+
+
+def _is_writable(conn, uid: str) -> bool | None:
+    try:
+        obj, bus_name = _call(conn, _FACTORY, "OpenCalendar", "s", (uid,))
+        addr = DBusAddress(obj, bus_name=bus_name, interface=_PROPS_IFACE)
+        body = _call(conn, addr, "Get", "ss", (_CAL_IFACE, "Writable"))
+        return bool(body[0][1])
+    except RuntimeError:
+        return None
+
+
+def list_calendars() -> list[Calendar]:
+    """Enumerate calendars from the EDS registry, with writability."""
+    cals: list[Calendar] = []
+    with open_dbus_connection(bus=_session_bus_address()) as conn:
+        intro = DBusAddress(
+            _SOURCE_MANAGER, bus_name=_SOURCES_DEST,
+            interface="org.freedesktop.DBus.Introspectable",
+        )
+        xml = _call(conn, intro, "Introspect")[0]
+        nodes = [n.get("name") for n in ET.fromstring(xml).findall("node") if n.get("name")]
+        for node in nodes:
+            path = f"{_SOURCE_MANAGER}/{node}"
+            try:
+                data = _get_prop(conn, path, _SOURCE_IFACE, "Data")
+            except RuntimeError:
+                continue
+            if not data:
+                continue
+            cp = configparser.ConfigParser()
+            try:
+                cp.read_string(data)
+            except configparser.Error:
+                continue
+            if not cp.has_section("Calendar"):
+                continue
+            uid = _get_prop(conn, path, _SOURCE_IFACE, "UID")
+            if not uid:
+                continue
+            cals.append(
+                Calendar(
+                    uid=uid,
+                    name=cp.get("Data Source", "DisplayName", fallback=uid),
+                    backend=cp.get("Calendar", "BackendName", fallback="?"),
+                    writable=_is_writable(conn, uid),
+                )
+            )
+    return cals
+
+
+def resolve_calendar(name: str | None = None) -> Calendar:
+    """Pick a writable calendar by display name (case-insensitive). With no name,
+    default to the local Personal calendar (safest: private, no invitations)."""
+    writable = [c for c in list_calendars() if c.writable]
+    if not writable:
+        raise RuntimeError("No writable calendar is available.")
+    if name is None:
+        for c in writable:
+            if c.backend == _LOCAL_BACKEND:
+                return c
+        return writable[0]
+    for c in writable:
+        if c.name.lower() == name.lower():
+            return c
+    available = ", ".join(repr(c.name) for c in writable)
+    raise RuntimeError(f"No writable calendar named {name!r}. Writable: {available}.")
+
+
+def _build_vevent(summary, start, end, all_day, location, description) -> tuple[str, str]:
+    ev = ICalEvent()
+    uid = f"{uuid.uuid4()}@gnome-calendar-mcp"
+    ev.add("uid", uid)
+    ev.add("dtstamp", datetime.now(timezone.utc))
+    ev.add("summary", summary)
+    if all_day:
+        # DTEND is exclusive for DATE values, so default to the day after.
+        ev.add("dtstart", start)
+        ev.add("dtend", end if end is not None else start + timedelta(days=1))
+    else:
+        # Store as UTC to avoid needing a VTIMEZONE block; clients show local time.
+        ev.add("dtstart", start.astimezone(timezone.utc))
+        ev.add("dtend", (end if end is not None else start + timedelta(hours=1)).astimezone(timezone.utc))
+    if location:
+        ev.add("location", location)
+    if description:
+        ev.add("description", description)
+    return ev.to_ical().decode("utf-8"), uid
+
+
+def create_event(summary, start, end=None, all_day=False, location=None,
+                 description=None, calendar=None) -> dict:
+    """Create an event on a writable calendar (default: local Personal).
+
+    `start`/`end` are date objects (all-day) or tz-aware datetimes (timed).
+    Returns the created uid and the calendar it landed on. No attendees — this
+    never sends invitations.
+    """
+    cal = resolve_calendar(calendar)
+    ics, fallback_uid = _build_vevent(summary, start, end, all_day, location, description)
+    with open_dbus_connection(bus=_session_bus_address()) as conn:
+        obj, bus_name = _call(conn, _FACTORY, "OpenCalendar", "s", (cal.uid,))
+        cal_addr = DBusAddress(obj, bus_name=bus_name, interface=_CAL_IFACE)
+        try:
+            _call(conn, cal_addr, "Open")  # ensure the backend is open on this connection
+        except RuntimeError:
+            pass
+        created = _call(conn, cal_addr, "CreateObjects", "asu", ([ics], 0))
+        uids = created[0] if created else []
+    return {"uid": uids[0] if uids else fallback_uid, "calendar": cal.name, "backend": cal.backend}
+
+
 if __name__ == "__main__":
-    # Smoke test: print the next week's agenda as the backend sees it.
+    # Smoke test: list calendars, then print the next week's agenda.
+    print("Calendars:")
+    for c in list_calendars():
+        flag = "writable" if c.writable else ("read-only" if c.writable is False else "unknown")
+        print(f"  [{flag:9}] {c.backend:8} {c.name}")
     now = datetime.now().astimezone()
-    print(f"Now: {now.isoformat()}")
+    print(f"\nNow: {now.isoformat()}")
     evs = agenda(7)
     print(f"{len(evs)} event(s):")
     for e in evs:
