@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import re
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -181,18 +182,64 @@ def events_between(start: date, end: date) -> list[Event]:
 # (a created event on a Google calendar propagates to Google).
 # --------------------------------------------------------------------------- #
 
-_SOURCES_DEST = "org.gnome.evolution.dataserver.Sources5"
 _SOURCE_MANAGER = "/org/gnome/evolution/dataserver/SourceManager"
 _SOURCE_IFACE = "org.gnome.evolution.dataserver.Source"
 _PROPS_IFACE = "org.freedesktop.DBus.Properties"
 _CAL_IFACE = "org.gnome.evolution.dataserver.Calendar"
 _LOCAL_BACKEND = "local"
 
-_FACTORY = DBusAddress(
-    "/org/gnome/evolution/dataserver/CalendarFactory",
-    bus_name="org.gnome.evolution.dataserver.Calendar8",
-    interface="org.gnome.evolution.dataserver.CalendarFactory",
-)
+_CAL_FACTORY_PATH = "/org/gnome/evolution/dataserver/CalendarFactory"
+_CAL_FACTORY_IFACE = "org.gnome.evolution.dataserver.CalendarFactory"
+
+# EDS suffixes its bus names with an ABI version that bumps on incompatible
+# changes (Sources5, Calendar8). Rather than hardcode the number — which would
+# hard-fail the day a future EDS bumps it — we discover the live name at runtime
+# and keep these as fallbacks for the (unexpected) case where enumeration finds
+# nothing. The "stem" is the part before the version digits.
+_EDS_PREFIX = "org.gnome.evolution.dataserver."
+_SOURCES_STEM = "Sources"
+_CALENDAR_STEM = "Calendar"
+_SOURCES_DEST_FALLBACK = f"{_EDS_PREFIX}{_SOURCES_STEM}5"
+_CALENDAR_DEST_FALLBACK = f"{_EDS_PREFIX}{_CALENDAR_STEM}8"
+
+# Resolved bus names are global to the session bus and only change across an EDS
+# restart (which means a new process), so caching them for the process lifetime
+# is safe and avoids re-enumerating on every call.
+_resolved_dest: dict[str, str] = {}
+
+
+def _discover_dest(conn, stem: str, fallback: str) -> str:
+    """Return the highest-versioned live EDS bus name for `stem`.
+
+    Enumerates both activatable and currently-owned names (the factories are
+    D-Bus activated, so they show up in ListActivatableNames even when idle) and
+    picks the largest `<prefix><stem><N>`. Falls back to `fallback` if nothing
+    matches or the bus can't be queried.
+    """
+    if stem in _resolved_dest:
+        return _resolved_dest[stem]
+    pattern = re.compile(rf"^{re.escape(_EDS_PREFIX + stem)}(\d+)$")
+    best_n, best = -1, None
+    for lister in (message_bus.ListActivatableNames(), message_bus.ListNames()):
+        try:
+            names = conn.send_and_get_reply(lister).body[0]
+        except Exception:
+            continue
+        for name in names:
+            m = pattern.match(name)
+            if m and int(m.group(1)) > best_n:
+                best_n, best = int(m.group(1)), name
+    _resolved_dest[stem] = best or fallback
+    return _resolved_dest[stem]
+
+
+def _sources_dest(conn) -> str:
+    return _discover_dest(conn, _SOURCES_STEM, _SOURCES_DEST_FALLBACK)
+
+
+def _factory(conn) -> DBusAddress:
+    name = _discover_dest(conn, _CALENDAR_STEM, _CALENDAR_DEST_FALLBACK)
+    return DBusAddress(_CAL_FACTORY_PATH, bus_name=name, interface=_CAL_FACTORY_IFACE)
 
 
 @dataclass
@@ -220,14 +267,14 @@ def _call(conn, addr, method, signature=None, body=()):
 
 
 def _get_prop(conn, object_path, iface, prop):
-    addr = DBusAddress(object_path, bus_name=_SOURCES_DEST, interface=_PROPS_IFACE)
+    addr = DBusAddress(object_path, bus_name=_sources_dest(conn), interface=_PROPS_IFACE)
     body = _call(conn, addr, "Get", "ss", (iface, prop))
     return body[0][1] if body else None  # jeepney decodes a variant to (sig, value)
 
 
 def _is_writable(conn, uid: str) -> bool | None:
     try:
-        obj, bus_name = _call(conn, _FACTORY, "OpenCalendar", "s", (uid,))
+        obj, bus_name = _call(conn, _factory(conn), "OpenCalendar", "s", (uid,))
         addr = DBusAddress(obj, bus_name=bus_name, interface=_PROPS_IFACE)
         body = _call(conn, addr, "Get", "ss", (_CAL_IFACE, "Writable"))
         return bool(body[0][1])
@@ -240,7 +287,7 @@ def list_calendars() -> list[Calendar]:
     cals: list[Calendar] = []
     with open_dbus_connection(bus=_session_bus_address()) as conn:
         intro = DBusAddress(
-            _SOURCE_MANAGER, bus_name=_SOURCES_DEST,
+            _SOURCE_MANAGER, bus_name=_sources_dest(conn),
             interface="org.freedesktop.DBus.Introspectable",
         )
         xml = _call(conn, intro, "Introspect")[0]
@@ -324,7 +371,7 @@ def create_event(summary, start, end=None, all_day=False, location=None,
     cal = resolve_calendar(calendar)
     ics, fallback_uid = _build_vevent(summary, start, end, all_day, location, description)
     with open_dbus_connection(bus=_session_bus_address()) as conn:
-        obj, bus_name = _call(conn, _FACTORY, "OpenCalendar", "s", (cal.uid,))
+        obj, bus_name = _call(conn, _factory(conn), "OpenCalendar", "s", (cal.uid,))
         cal_addr = DBusAddress(obj, bus_name=bus_name, interface=_CAL_IFACE)
         try:
             _call(conn, cal_addr, "Open")  # ensure the backend is open on this connection
