@@ -1,0 +1,20 @@
+[project]
+name = "gnome-calendar-mcp"
+version = "0.1.0"
+description = "MCP server exposing the GNOME (Online Accounts) calendar to Claude Code as read-only tools"
+readme = "README.md"
+authors = [
+    { name = "James Dedon", email = "james.dedon@proton.me" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "jeepney>=0.9.0",
+    "mcp>=1.27.2",
+]
+
+[project.scripts]
+gnome-calendar-mcp = "gnome_calendar_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.11.6,<0.12.0"]
+build-backend = "uv_build"
