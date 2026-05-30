@@ -275,6 +275,16 @@ def _get_prop(conn, object_path, iface, prop):
 def _is_writable(conn, uid: str) -> bool | None:
     try:
         obj, bus_name = _call(conn, _factory(conn), "OpenCalendar", "s", (uid,))
+        cal_addr = DBusAddress(obj, bus_name=bus_name, interface=_CAL_IFACE)
+        # `Writable` is only meaningful once the backend is opened. A cold backend
+        # — right after login, an EDS restart, or resume from suspend — reports
+        # Writable=False until Open loads it. create_event opens before writing, so
+        # probe the same way; otherwise a freshly-woken laptop would report every
+        # calendar read-only and resolve_calendar would refuse to create events.
+        try:
+            _call(conn, cal_addr, "Open")
+        except RuntimeError:
+            pass
         addr = DBusAddress(obj, bus_name=bus_name, interface=_PROPS_IFACE)
         body = _call(conn, addr, "Get", "ss", (_CAL_IFACE, "Writable"))
         return bool(body[0][1])
@@ -322,11 +332,17 @@ def list_calendars() -> list[Calendar]:
 
 
 def resolve_calendar(name: str | None = None) -> Calendar:
-    """Pick a writable calendar by display name (case-insensitive). With no name,
-    default to the local Personal calendar (safest: private, no invitations)."""
+    """Pick a writable calendar by display name (case-insensitive).
+
+    With no explicit name, fall back to the `GNOME_CAL_WRITE_CALENDAR` env var if
+    set — a guardrail so writes land on a dedicated calendar (e.g. "Logbook")
+    instead of a shared one. With neither, default to the local Personal calendar
+    (safest: private, never shared, no invitations)."""
     writable = [c for c in list_calendars() if c.writable]
     if not writable:
         raise RuntimeError("No writable calendar is available.")
+    if name is None:
+        name = os.environ.get("GNOME_CAL_WRITE_CALENDAR") or None
     if name is None:
         for c in writable:
             if c.backend == _LOCAL_BACKEND:

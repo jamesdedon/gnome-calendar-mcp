@@ -19,8 +19,8 @@ GNOME Calendar, it shows up here.
 - **`list_calendars()`** — all calendars and which are writable (a create target).
 - **`create_event(summary, start, end?, location?, description?, calendar?)`** —
   add an event. `start`/`end` are `YYYY-MM-DDTHH:MM` (local) for timed events or
-  `YYYY-MM-DD` for all-day. Defaults to the local **Personal** calendar; pass a
-  calendar name to target another.
+  `YYYY-MM-DD` for all-day. With no `calendar`, writes to `GNOME_CAL_WRITE_CALENDAR`
+  if set, else the local **Personal** calendar; pass a name to target another.
 
 Each event read back has: `summary`, `start`/`end` (ISO local), `all_day`, `day`.
 
@@ -36,6 +36,16 @@ calendar is pushed up to Google by EDS server-side.
 creates the event on your calendar only. (Invitations would need a deliberate
 follow-up: either attendees on a groupware calendar, or emailing an iCalendar
 invite.)
+
+**Pinning a write calendar.** Set `GNOME_CAL_WRITE_CALENDAR=<name>` to make
+unqualified writes land on a dedicated calendar (e.g. a `Logbook` calendar for
+automated time-blocks) instead of `Personal` — a guardrail so agent-created
+events never clutter a shared calendar. An explicit `calendar` argument still
+overrides it.
+
+> Writability is probed by *opening* each backend first. A calendar reported
+> read-only right after resume-from-suspend or an EDS restart is just a cold
+> backend — opening it (as `create_event` does) brings it back.
 
 ## How it works
 
@@ -67,9 +77,12 @@ runs under `uv` with no system bindings.
 Registered as a user-scope MCP server:
 
 ```sh
-claude mcp add gnome-calendar --scope user -- \
+claude mcp add gnome-calendar --scope user \
+  -e GNOME_CAL_WRITE_CALENDAR=Logbook -- \
   uv run --project /path/to/gnome-calendar-mcp gnome-calendar-mcp
 ```
+
+(Drop the `-e` line to write to the local **Personal** calendar by default.)
 
 Then any Claude Code session can use the tools. The companion `/plan` command
 (`~/.claude/commands/plan.md`) calls `get_agenda` and walks you through planning
