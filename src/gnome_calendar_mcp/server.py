@@ -136,7 +136,10 @@ def create_event(
     """
 
     def run():
-        tz = datetime.now().astimezone().tzinfo
+        # Must come from gcal._local_tz(): `datetime.now().astimezone().tzinfo`
+        # is a fixed offset, which silently shifts events outside the current
+        # DST period by an hour.
+        tz = gcal._local_tz()
         start_val, all_day = _parse_when(start, tz)
         end_val = _parse_when(end, tz)[0] if end else None
         result = gcal.create_event(

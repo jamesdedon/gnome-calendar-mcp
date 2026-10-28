@@ -24,6 +24,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from icalendar import Event as ICalEvent
 from jeepney import DBusAddress, MatchRule, message_bus, new_method_call
@@ -77,6 +78,28 @@ def _session_bus_address() -> str:
 
 
 def _local_tz():
+    """Return the DST-aware local timezone.
+
+    `datetime.now().astimezone().tzinfo` yields a *fixed-offset* tzinfo (e.g.
+    "EDT -04:00") rather than a real zone. Attaching that to a date elsewhere in
+    the year shifts the stored instant: a November timestamp parsed while the
+    clock reads October gets -04:00 instead of -05:00, landing an hour early.
+    Resolve an actual IANA zone so each date gets its own UTC offset.
+    """
+    tz_name = os.environ.get("TZ")
+    if tz_name:
+        try:
+            return ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    # /etc/localtime is conventionally a symlink into the zoneinfo database.
+    try:
+        target = os.path.realpath("/etc/localtime")
+        _, sep, name = target.partition("zoneinfo/")
+        if sep and name:
+            return ZoneInfo(name)
+    except (OSError, ValueError):
+        pass
     return datetime.now().astimezone().tzinfo
 
 
