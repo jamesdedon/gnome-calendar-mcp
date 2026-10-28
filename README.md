@@ -21,6 +21,14 @@ GNOME Calendar, it shows up here.
   add an event. `start`/`end` are `YYYY-MM-DDTHH:MM` (local) for timed events or
   `YYYY-MM-DD` for all-day. With no `calendar`, writes to `GNOME_CAL_WRITE_CALENDAR`
   if set, else the local **Personal** calendar; pass a name to target another.
+- **`list_objects(calendar?)`** — every event on one calendar, each with its `uid`.
+  The Shell agenda carries no UIDs, so this is how you get a target for the two
+  tools below.
+- **`update_event(uid, summary?, description?, location?, calendar?)`** — edit
+  those fields in place; omitted fields are left alone. Times are deliberately
+  not editable — delete and re-create to reschedule.
+- **`delete_event(uid, confirm=False, calendar?)`** — delete one event. Refuses
+  unless `confirm=True`, which should only ever follow an explicit user request.
 
 Each event read back has: `summary`, `start`/`end` (ISO local), `all_day`, `day`.
 
@@ -36,6 +44,13 @@ calendar is pushed up to Google by EDS server-side.
 creates the event on your calendar only. (Invitations would need a deliberate
 follow-up: either attendees on a groupware calendar, or emailing an iCalendar
 invite.)
+
+**Editing and deleting.** EDS's `ModifyObjects`/`RemoveObjects` take an
+`ECalObjModType` name. Passing an empty string is accepted by the D-Bus layer —
+you get a clean `method_return` and no error — but nothing whatsoever happens,
+which is indistinguishable from a backend rejection. The code passes `"THIS"`.
+Both operations also need the object's UID, which the Shell agenda does not
+carry; that is what `list_objects` is for.
 
 **Pinning a write calendar.** Set `GNOME_CAL_WRITE_CALENDAR=<name>` to make
 unqualified writes land on a dedicated calendar (e.g. a `Logbook` calendar for
