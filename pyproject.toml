@@ -3,6 +3,8 @@ name = "gnome-calendar-mcp"
 version = "0.1.0"
 description = "MCP server exposing the GNOME (Online Accounts) calendar to Claude Code: read agenda and create events"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "James Dedon", email = "james.dedon@proton.me" }
 ]

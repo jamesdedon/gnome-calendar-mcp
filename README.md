@@ -97,3 +97,7 @@ uv run python src/gnome_calendar_mcp/gcal.py
 # Run the stdio server directly:
 uv run gnome-calendar-mcp
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
